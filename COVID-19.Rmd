@@ -1,0 +1,163 @@
+---
+title: "Multivariate Time Series Clustering of US States Using COVID-19 Data"
+author: "Brandon Vittetoe"
+date: "`r Sys.Date()`"
+output: pdf_document
+bibliography: references.bib
+csl: "apa.csl"
+---
+
+```{r, include=FALSE}
+setwd("C:/Users/Brand/Documents/R/COVID-19")
+
+library(COVID19) # Data
+library(tidyverse) # Wrangling
+library(zoo) # Preprocessing
+library(cluster) # Clustering
+library(GGally) # Visualization
+library(ggdendro) # Visualization
+library(maps) # Visualization
+library(knitr) # Beautification
+
+COLS <- c("date", "confirmed", "deaths", "tests", "vaccines", "hosp", "icu", "administrative_area_level_2")
+STATES <- c("Alabama", "Alaska", "Arizona", "Arkansas", "California", "Colorado", "Connecticut", "Delaware", "Florida", "Georgia", "Hawaii", "Idaho", "Illinois", "Indiana", "Iowa", "Kansas", "Kentucky", "Louisiana", "Maine", "Maryland", "Massachusetts", "Michigan", "Minnesota", "Mississippi", "Missouri", "Montana", "Nebraska", "Nevada", "New Hampshire", "New Jersey", "New Mexico", "New York", "North Carolina", "North Dakota", "Ohio", "Oklahoma", "Oregon", "Pennsylvania", "Rhode Island", "South Carolina", "South Dakota", "Tennessee", "Texas", "Utah", "Vermont", "Virginia", "Washington", "West Virginia", "Wisconsin", "Wyoming")
+START <- "2020-12-25"
+END <- "2022-12-31"
+VARS <- c("confirmed", "deaths", "recovered", "tests", "vaccines", "hosp", "icu", "vent")
+DESCS <- c("Cumulative number of confirmed cases.", "Cumulative number of deaths.", "Cumulative number of patients released from hospitals or reported recovered.", "Cumulative number of tests.", "Cumulative number of total doses administered.", "Number of hospitalized patients on date.", "Number of hospitalized patients in intensive therapy on date.", "Number of patients requiring invasive ventilation on date.")
+FEATS <- c("confirmed", "deaths", "tests", "vaccines", "hosp", "icu")
+CUMFEATS <- c("confirmed", "deaths", "tests", "vaccines")
+LABELS <- c("confirmed" = "Cases", "deaths" = "Deaths", "tests" = "Tests", "vaccines" = "Vaccines", "hosp" = "Hospitalizations", "icu" = "ICU")
+```
+
+In this study, we conducted a hierarchical clustering analysis of COVID-19 data across US states from 2021 to 2022, utilizing the dataset from the COVID-19 Data Hub. We methodically cleaned the data, preprocessed it, and performed gap statistic analysis. Our analysis identified distinct regional clusters that reflect the varied impact of the pandemic.
+
+## Introduction
+
+The COVID-19 pandemic has profoundly impacted public health systems worldwide, with the United States facing significant challenges in controlling the virus's spread. This paper presents a clustering analysis of US states based on COVID-19 data trends, focusing on cases, deaths, tests, vaccines, hospitalizations, and ICU admissions. Our methodology includes data cleaning, preprocessing, and clustering.
+
+The dataset, sourced from the COVID-19 Data Hub [@guidotti2020], provides daily summaries of epidemiological data, policy measures, mobility data, and geospatial identifiers from government sources globally [@guidotti2022]. We accessed the dataset through the `covid19` function from the `COVID19` package.
+
+```{r, eval=FALSE}
+library(COVID19)
+
+covid19(country = c("US"), level = 2)
+```
+```{r, echo=FALSE, message=FALSE}
+data <- read_csv("data.csv")
+```
+
+This subset comprises approximately 75,000 rows and 50 columns. Our analysis focused on the 50 US states (excluding territories like Puerto Rico and Washington DC) between 2021 and 2022. Furthermore, we focued on the epidemiological variables, defined in Table 1.
+
+```{r, echo=FALSE}
+tibble("Variable" = VARS, "Description" = DESCS) %>% kable(caption = "Definitions of Epidemiological Variables")
+```
+
+However, we excluded the `recovered` and `vent` variables from the analysis due to significant missing data, with about 95% of values missing. Table 2 summarizes the missing values per variable.
+
+```{r, echo=FALSE}
+data %>% filter(administrative_area_level_2 %in% STATES, date >= "2021-01-01", date <= "2022-12-31") %>% select(all_of(VARS)) %>% summarize_all(~ sum(is.na(.))) %>% gather("Variable", "Missing Values") %>% kable(caption = "Missing Values per Variable")
+```
+
+During the cleaning process, we will address the remaining missing values in the `tests` variable.
+
+## Data Cleaning
+
+To ensure the integrity of our analysis, we performed the following data cleaning steps:
+
+1. **Column Selection**: We selected these columns for our analysis: `date`, `confirmed`, `deaths`, `tests`, `vaccines`, `hosp`, `icu`, and `administrative_area_level_2`.
+2. **Row Filtering**: We included only the data for the 50 US states from the years 2021 and 2022.
+3. **Missing Value Interpolation**: We employed linear interpolation to fill in missing values in the `tests` variable.
+4. **Cumulative Variable Transformation**: We converted the cumulative `confirmed`, `deaths`, `tests`, and `vaccines` data into daily increments.
+
+```{r, echo=FALSE}
+clean_data <- data %>% filter(administrative_area_level_2 %in% STATES, date >= START, date <= END) %>% select(all_of(COLS)) %>% distinct() %>% arrange(date, administrative_area_level_2) %>% group_by(administrative_area_level_2) %>% mutate(across(all_of(FEATS), ~ na.approx(.))) %>% mutate(across(all_of(CUMFEATS), ~ . - lag(.))) %>% ungroup() %>% drop_na()
+```
+
+Table 3 presents the first 10 rows of the cleaned data.
+
+```{r, echo=FALSE}
+clean_data %>% filter(date >= "2021-01-01") %>% head() %>% kable(caption = "First 10 Rows of Cleaned Data.")
+```
+
+The cleaned dataset now contains 36,500 rows, which corresponds to 365 days per year over 2 years for each of the 50 states, and it is free of missing values. Figure 1 illustrates the cleaned data for four representative states—California, Michigan, New York, and Texas—showcasing the West, Midwest, Northeast, and South regions.
+
+```{r, echo=FALSE}
+clean_data %>% filter(administrative_area_level_2 %in% c("California", "Texas", "Michigan", "New York")) %>% gather(key, value, all_of(FEATS)) %>% ggplot(aes(date, value, color = administrative_area_level_2)) + geom_line() + facet_wrap(~ key, labeller = as_labeller(LABELS)) + scale_x_date(date_breaks = "2 month", date_labels = "%b %y") + labs(caption = "Figure 1: COVID-19 Variables vs Time (Cleaned)", color = "State", x = "Date", y = "Number of Variable") + theme_bw() + theme(axis.text.x = element_text(angle = 90, hjust=1, vjust = 0.5))
+```
+
+However, Figure 1 reveals three issues with the data. Firstly, the jagged nature of the data could negatively impact the distance calculations in our clustering analysis. Secondly, the lack of scaling within variables could introduce bias towards the `population` variable during clustering. Thirdly, the absence of scaling between variables could skew the clustering towards the `tests` and `vaccines` variables. We will rectify these issues during preprocessing.
+
+## Data Preprocessing
+
+In the preprocessing stage, we focused on two key steps: smoothing and scaling.
+
+For smoothing, we considered two techniques: the 7-day moving average, which averages data over a week to mitigate short-term fluctuations, and LOESS (Locally Estimated Scatterplot Smoothing), which employs local polynomial regression to fit the data more accurately. Figure 2 illustrates a comparison between these two methods.
+
+```{r, echo=FALSE}
+clean_data %>% mutate(helper = as.numeric(date)) %>% group_by(administrative_area_level_2) %>% mutate(raw = vaccines, sda = rollmean(vaccines, 7, fill = NA, align = "right"), loess = loess(vaccines ~ helper, span = 0.05)$fitted) %>% ungroup() %>% select(date, administrative_area_level_2, raw, sda, loess) %>% filter(administrative_area_level_2 %in% c("California", "Texas", "Michigan", "New York"), date >= "2021-01-01") %>% gather(key, value, raw, sda, loess) %>% ggplot(aes(date, value, color = administrative_area_level_2)) + geom_line() + facet_wrap(~ factor(key, levels = c("raw", "sda", "loess")), labeller = as_labeller(c("raw" = "Raw", "sda" = "7 Day Average", "loess" = "LOESS")), scales = "free_y") + scale_x_date(date_breaks = "2 month", date_labels = "%b %y") + labs(caption = "Figure 2: Comparison of Smoothing Methods", color = "State", x = "Date", y = "Number of Vaccines") + theme_bw() + theme(aspect.ratio = 1, axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1), axis.text.y = element_blank(), axis.ticks.y = element_blank())
+```
+
+The results indicated that LOESS was superior to the 7-day moving average in terms of preserving the original trends of the time series without excessive smoothing. Following the smoothing process, we proceeded to scale the data to ensure comparability. Figure 3 displays the scaled data for the states of California, Michigan, New York, and Texas.
+
+```{r, echo=FALSE}
+data <- clean_data %>% filter(date >= "2021-01-01") %>% mutate(helper = as.numeric(date)) %>% group_by(administrative_area_level_2) %>% mutate(across(all_of(FEATS), ~ scale(loess(. ~ helper, span = 0.05)$fitted))) %>% ungroup() %>% select(-helper)
+
+data %>% filter(administrative_area_level_2 %in% c("California", "Texas", "Michigan", "New York")) %>% gather(key, value, all_of(FEATS)) %>% ggplot(aes(date, value, color = administrative_area_level_2)) + geom_line() + facet_wrap(~ key, labeller = as_labeller(LABELS)) + scale_x_date(date_breaks = "2 month", date_labels = "%b %y") + labs(caption = "Figure 3: COVID-19 Variables vs Time (Preprocessed)", color = "State", x = "Date", y = "Scaled Number of Variable") + theme_bw() + theme(axis.text.x = element_text(angle = 90, hjust=1, vjust = 0.5))
+```
+
+The application of both smoothing and scaling techniques ensures that the time series data can be compared equitably, both within individual variables and across different variables. For an in-depth discussion on these preprocessing methods, refer to "Local Regression Models" and "The New S Language" [@cleveland2017local; @becker1988new]. With the data now preprocessed, we are ready to cluster the data.
+
+## Data Clustering
+
+In our study, we employed hierarchical clustering to group the data. The initial step was to calculate the distances between the states. We generated a 50 x 50 distance matrix for each epidemiological variable using the Euclidean distance measure. We then aggregated these matrices to create a comprehensive distance matrix, ensuring equal weighting for each variable.
+
+With the overall distance matrix prepared, we integrated it into the hierarchical clustering algorithm. For additional information, refer to "The New S Language" [@becker1988new]. Figure 4 depicts the dendrogram resulting from our analysis.
+
+```{r, echo=FALSE}
+d <- 0
+
+for (i in FEATS) { d <- d + dist(data %>% select(date, administrative_area_level_2, all_of(i)) %>% spread(administrative_area_level_2, all_of(i)) %>% select(-date) %>% t(), method = "euclidean") }
+
+hc <- hclust(d, method = "complete")
+
+ggdendrogram(hc) + labs(caption = "Figure 4: States Clustered by COVID-19 Variables", x = "State", y = "Distance") + theme_bw() + theme(axis.text.x = element_text(angle = 90, hjust=1, vjust = 0.5))
+```
+
+To determine the optimal number of clusters cluster, we computed the gap statistic for cluster numbers ranging from 1 to 10. The gap statistic compares the within-cluster variation with the expected variation under a reference null distribution, which we generated via bootstrapping. The greater the gap, the more distinct the clustering structure is from randomness [@tibshirani2001estimating]. Figure 5 illustrates the gap statistic, including the standard errors, for various cluster counts.
+
+```{r, echo=FALSE}
+d <- c()
+idx <- rep(0, length(FEATS) + 1)
+
+for (i in 1:length(FEATS)) { d <- cbind(d, data %>% select(date, administrative_area_level_2, all_of(FEATS[i])) %>% spread(key = administrative_area_level_2, value = all_of(FEATS[i])) %>% select(-date) %>% t()); idx[i + 1] <- ncol(d) }
+
+set.seed(607)
+
+gap <- as.data.frame(clusGap(d, FUN = function(x, k) { d <- 0; for (i in 1:length(FEATS)) { d <- d + dist(x[ , (idx[i] + 1):idx[i + 1]], method = "euclidean") }; list(cluster = cutree(hclust(d, method = "complete"), k = k)) }, K.max = 10)$Tab)
+
+k <- maxSE(gap$gap, gap$SE.sim, method = "firstSEmax")
+
+gap %>% ggplot(aes(1:length(gap), gap)) + geom_vline(xintercept = k, linetype="dashed", color = "blue") + geom_point() + geom_line() + geom_errorbar(aes(ymax = gap + SE.sim, ymin = gap - SE.sim), width = 0.25) + scale_x_continuous(breaks = seq(0, 10, by = 1)) + labs(caption = "Figure 5: Gap Statistic vs Number of Clusters", x = "Number of Clusters", y = "Gap Statistic") + theme_bw()
+```
+
+The figure indicates the gap statistic with an error margin of plus or minus one standard error. We applied the `firstSEmax` method to identify the smallest cluster number whose gap statistic lies within one standard error of the first local maximum [@tibshirani2001estimating]. Here, the first local maximum is observed at \( k = 7 \), and the optimal cluster number is determined to be \( k = 4 \).
+
+Upon establishing the optimal cluster number, we segmented the dendrogram accordingly. Figure 6 presents the clusters superimposed on a map of the United States.
+
+```{r, echo=FALSE}
+clusters <- cutree(hc, k = k)
+clusters <- data.frame(region = tolower(names(clusters)), cluster = as.factor(clusters))
+clusters <- merge( map_data("state"), clusters, sort = FALSE, by = "region")
+clusters <- clusters[order(clusters$order), ]
+
+ggplot(clusters, aes(x = long, y = lat)) + geom_polygon(aes(group = group, fill = cluster), color = "black") + coord_map("albers", lat0 = 45.5, lat1 = 29.5) + labs(caption = "Figure 6: States Clustered by COVID-19 Variables", fill = "Cluster", x = "", y = "") + theme_bw() + theme(axis.text = element_blank(), axis.ticks = element_blank())
+```
+
+The map highlights regional trends within the COVID-19 data. A substantial cluster encompasses the South and extends into the West, while another significant cluster spans the Midwest, reaching into the Northeast and Southwest, indicating regional similarities in pandemic patterns. Moreover, a smaller cluster in the Northwest and a distinct, non-contiguous cluster comprising several Northeastern states, Illinois, and California, reflect diverse responses and outcomes to the pandemic. Notably, Alaska and Hawaii are part of clusters 2 and 1, respectively.
+
+## Conclusion
+
+In our research, we utilized hierarchical clustering on multivariate time series data of COVID-19 metrics to uncover distinct regional patterns of the pandemic's impact throughout the US. Our methodical approach, which included data cleaning, preprocessing, and employing the gap statistic to determine the optimal number of clusters, led to the identification of pronounced clusters in the South and Midwest. Additionally, we discovered a smaller cluster in the Northwest and a distinctive grouping that included several Northeastern states, Illinois, and California. These results offer critical insights for shaping targeted public health policies and underscore the pivotal role of data-driven analysis in comprehending and addressing the challenges of the pandemic.
+
+## References

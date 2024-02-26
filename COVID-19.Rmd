@@ -8,8 +8,6 @@ csl: "apa.csl"
 ---
 
 ```{r, include=FALSE}
-setwd("C:/Users/Brand/Documents/R/COVID-19")
-
 library(COVID19) # Data
 library(tidyverse) # Wrangling
 library(zoo) # Preprocessing
